@@ -74,7 +74,7 @@ func run(ctx context.Context, args runArgs) error {
 	if err != nil {
 		return err
 	}
-	if err := putLayer(ctx, args.imageSpec, auth, tgzInfo, tgz); err != nil {
+	if err := uploadBlob(ctx, args.imageSpec, auth, tgz); err != nil {
 		return err
 	}
 	manifest, err := putImageConfig(ctx, args.imageSpec, auth, tgzInfo)
@@ -88,13 +88,6 @@ func run(ctx context.Context, args runArgs) error {
 // config as a separate blob, and returns json-serialized manifest that
 // describes both layer and config.
 func putImageConfig(ctx context.Context, img imageSpec, auth string, tgzInfo *layerMetadata) (json.RawMessage, error) {
-	uploadURL, err := getUploadLocation(ctx, img, auth)
-	if err != nil {
-		return nil, err
-	}
-	if strings.ContainsRune(uploadURL, '?') {
-		return nil, fmt.Errorf("upload url contains '?': %q", uploadURL)
-	}
 	now := time.Now().UTC()
 	runConfig := struct {
 		Arch   string          `json:"architecture"`
@@ -124,22 +117,10 @@ func putImageConfig(ctx context.Context, img imageSpec, auth string, tgzInfo *la
 	}
 	configDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(body))
 
-	uploadURL = uploadURL + "?digest=" + configDigest
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(body))
-	if err != nil {
+	if err := uploadBlob(ctx, img, auth, body); err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Basic "+auth)
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.ContentLength = int64(len(body))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("unexpected status on config upload %q: %v", req.URL, resp.Status)
-	}
+
 	type blobInfo struct {
 		MediaType string `json:"mediaType"`
 		Size      int    `json:"size"`
@@ -196,9 +177,8 @@ func putManifest(ctx context.Context, img imageSpec, auth string, body json.RawM
 	return nil
 }
 
-// putLayer pushes a single image layer. See
-// https://docs.docker.com/registry/spec/api/#pushing-a-layer
-func putLayer(ctx context.Context, img imageSpec, auth string, info *layerMetadata, body []byte) error {
+// uploadBlob uploads given blob to the registry.
+func uploadBlob(ctx context.Context, img imageSpec, auth string, body []byte) error {
 	uploadURL, err := getUploadLocation(ctx, img, auth)
 	if err != nil {
 		return err
@@ -206,7 +186,7 @@ func putLayer(ctx context.Context, img imageSpec, auth string, info *layerMetada
 	if strings.ContainsRune(uploadURL, '?') {
 		return fmt.Errorf("upload url contains '?': %q", uploadURL)
 	}
-	uploadURL = uploadURL + "?digest=" + info.outerDigest
+	uploadURL += fmt.Sprintf("?digest=sha256:%x", sha256.Sum256(body))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -220,7 +200,7 @@ func putLayer(ctx context.Context, img imageSpec, auth string, info *layerMetada
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("unexpected status on layer upload %q: %v", req.URL, resp.Status)
+		return fmt.Errorf("unexpected status on blob upload %q: %v", req.URL, resp.Status)
 	}
 	return nil
 }
