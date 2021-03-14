@@ -63,7 +63,7 @@ func run(ctx context.Context, args runArgs) error {
 	authFile := os.ExpandEnv(filepath.FromSlash("${HOME}/.docker/config.json"))
 	auth, err := readAuth(authFile, args.imageSpec.Domain)
 	if err != nil {
-		return err
+		return fmt.Errorf("credentials read: %w", err)
 	}
 	if args.bin == "" {
 		if args.bin, err = os.Executable(); err != nil {
@@ -72,16 +72,19 @@ func run(ctx context.Context, args runArgs) error {
 	}
 	tgz, tgzInfo, err := archiveBinary(args.bin)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating an image layer: %w", err)
 	}
 	if err := uploadBlob(ctx, args.imageSpec, auth, tgz); err != nil {
-		return err
+		return fmt.Errorf("uploading an image layer: %w", err)
 	}
 	manifest, err := putImageConfig(ctx, args.imageSpec, auth, tgzInfo)
 	if err != nil {
-		return fmt.Errorf("run config upload: %w", err)
+		return fmt.Errorf("config upload: %w", err)
 	}
-	return putManifest(ctx, args.imageSpec, auth, manifest)
+	if err := putManifest(ctx, args.imageSpec, auth, manifest); err != nil {
+		return fmt.Errorf("publishing manifest: %w", err)
+	}
+	return nil
 }
 
 // putImageConfig generates an image config from layer metadata, uploads this
@@ -170,9 +173,9 @@ func putManifest(ctx context.Context, img imageSpec, auth string, body json.RawM
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		body := new(bytes.Buffer)
-		io.Copy(body, io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("unexpected status on manifest put %q: %v\n%s", req.URL, resp.Status, body.Bytes())
+		b := new(bytes.Buffer)
+		io.Copy(b, io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("unexpected status on manifest put %q: %v\n%s", req.URL, resp.Status, b.Bytes())
 	}
 	return nil
 }
@@ -200,7 +203,9 @@ func uploadBlob(ctx context.Context, img imageSpec, auth string, body []byte) er
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("unexpected status on blob upload %q: %v", req.URL, resp.Status)
+		b := new(bytes.Buffer)
+		io.Copy(b, io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("unexpected status on blob upload %q: %v\n%s", req.URL, resp.Status, b.Bytes())
 	}
 	return nil
 }
@@ -224,7 +229,9 @@ func getUploadLocation(ctx context.Context, img imageSpec, auth string) (string,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("unexpected status on %v: %v", req.URL.Path, resp.Status)
+		b := new(bytes.Buffer)
+		io.Copy(b, io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("unexpected status on %s %s: %v\n%s", req.Method, req.URL.Path, resp.Status, b.Bytes())
 	}
 	location := resp.Header.Get("Location")
 	if location == "" {
